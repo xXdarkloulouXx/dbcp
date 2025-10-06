@@ -4,7 +4,7 @@ This project redefines human interaction in virtual spaces, merging emotion, con
 
 ## 1. Members
 
-| Name              | Master                |
+| Name              | Background                |
 |-------------------|-----------------------|
 | Camille Bouvier   | Business Engineering |
 | Renaud Cornélis   | Business Engineering |
