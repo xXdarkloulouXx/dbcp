@@ -16,14 +16,11 @@ This project redefines human interaction in virtual spaces, merging emotion, con
 
 ## 2. Directory Overview
 
-- LLM : All LLM related work.
-- S2T : All S2T related work.
-- T2S : All T2S related work.
+- `Assets/` : Unity assets, scenes, scripts and other resources for the VR application.
+- `Packages/` : Unity package manifest and dependencies used by the project.
+- `ProjectSettings/` : Unity project configuration (input, graphics, XR settings, etc.).
 
-## 3. Project Status
-The project is under development.
-
-## 4. Git LFS and Large Files
+## 3. Git LFS and Large Files
 
 This repository uses **Git LFS (Large File Storage)** to manage heavy binary files:
 
@@ -33,7 +30,7 @@ This repository uses **Git LFS (Large File Storage)** to manage heavy binary fil
 
 These patterns are defined in the `.gitattributes` file and must be handled via Git LFS.
 
-### 4.1. Initial setup (one time per machine)
+### 3.1. Initial setup (one time per machine)
 
 On each machine that will clone and work on this repo, install and initialize Git LFS:
 
@@ -54,7 +51,7 @@ Git LFS will automatically pull the large files during the clone. If needed, you
 git lfs pull
 ```
 
-### 4.2. Adding or updating large files
+### 3.2. Adding or updating large files
 
 When you add or modify `.onnx`, `.dll`, or `.so` files, they will automatically be stored via Git LFS because of the existing `.gitattributes` configuration. Just stage and commit them as usual:
 
@@ -71,6 +68,9 @@ git lfs track "*.pt"
 ```
 
 and commit the updated `.gitattributes`.
+
+## 4. Project Status
+The project is under development.
 
 ## 5. License
 Project realised in the context of the Digital Business Capstone Project GEST7064-1 course at HEC Liège.
