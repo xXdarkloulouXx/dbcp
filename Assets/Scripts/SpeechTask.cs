@@ -1,12 +1,5 @@
 using UnityEngine;
 
-
-/*
- * This class is a message object
- * We queue them in the general manager
- * More properties can be added later inside to improve the llm behavior and the text to speech
-*/
-
 public class SpeechTask
 {
     public string TextToSpeak;

@@ -118,19 +118,6 @@ public class PiperManager : MonoBehaviour
         _WarmupModel();
         Debug.Log("Finished warmup.");
 
-        // --- NOUVEAU : lire le texte de démarrage depuis Resources ---
-        TextAsset startupTextAsset = Resources.Load<TextAsset>("TextFiles/start_up_file");
-        if (startupTextAsset != null)
-        {
-            string startupText = startupTextAsset.text;
-            Debug.Log($"Texte de démarrage lu : {startupText}");
-            //SynthesizeAndPlay(startupText);  // Piper dit le texte automatiquement
-        }
-        else
-        {
-            Debug.LogError("Fichier startup_text.txt introuvable dans Resources/TextFiles");
-        }
-
     }
 
     private void InitializeESpeak(string dataPath)

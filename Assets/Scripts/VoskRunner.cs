@@ -30,7 +30,6 @@ public class VoskRunner : MonoBehaviour, IASRRunner
         string modelPath;
 
 #if UNITY_EDITOR
-        // --- Mode Éditeur : on charge directement le dossier du modèle ---
         modelPath = Path.Combine(Application.streamingAssetsPath, voskModelFolderName);
         Debug.Log($"[VoskRunner-Editor] Using model path: {modelPath}");
 
@@ -40,7 +39,6 @@ public class VoskRunner : MonoBehaviour, IASRRunner
         }
 
 #else
-        // --- Mode Build Android / Quest ---
         modelPath = Path.Combine(Application.persistentDataPath, voskModelFolderName);
 
         if (!Directory.Exists(modelPath))
@@ -79,13 +77,11 @@ public class VoskRunner : MonoBehaviour, IASRRunner
         }
 #endif
 
-        // --- Initialisation du modèle Vosk ---
         Vosk.Vosk.SetLogLevel(-1); // désactive les logs internes
         _voskModel = new Model(modelPath);
         Debug.Log("[VoskRunner] Vosk model initialized successfully.");
     }
 
-    // --- Copie du zip depuis StreamingAssets vers persistentDataPath ---
     private async Task CopyStreamingAssetToPersistentAsync(string sourcePath, string destinationPath)
     {
         Debug.Log($"[VoskRunner] Copying model from StreamingAssets: {sourcePath}");
@@ -121,7 +117,6 @@ public class VoskRunner : MonoBehaviour, IASRRunner
         }
     }
 
-    // --- Gestion audio et résultats ---
     public void StartSpeechSegment()
     {
         if (_voskModel == null)

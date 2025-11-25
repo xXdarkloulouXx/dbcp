@@ -87,7 +87,7 @@ public class ASRManager : MonoBehaviour
     {
         UpdateFPS();
 
-        if (!isListening) return; // <<< NE TRAITE PAS LE MICRO SI ON NE VEUT PAS ÉCOUTER --> quand piper parle
+        if (!isListening) return; 
         
         if (_currentState == State.Idle || _currentState == State.Speaking)
         {
@@ -221,13 +221,11 @@ public class ASRManager : MonoBehaviour
     }
     private void FeedAudioToRunner(float[] audioChunk)
     {
-        // Ajoute le chunk à notre liste pour l'enregistrement
         if (_currentState == State.Speaking && audioChunk != null)
         {
             _currentSpeechAudioData.AddRange(audioChunk);
         }
         
-        // Envoie le chunk à l'ASR
         _activeRunner.ProcessAudioChunk(audioChunk);
     }
 
@@ -290,15 +288,13 @@ public class ASRManager : MonoBehaviour
         }
         if (_isAwaitingFinalResult)
         {
-            // C'est le moment de sauvegarder ! 
             SaveRecording();
-            _isAwaitingFinalResult = false; // On réinitialise le drapeau
+            _isAwaitingFinalResult = false; 
 
-             // <<< NOUVEAU : notifier GeneralManager de la transcription finale
             if (!string.IsNullOrWhiteSpace(_currentSpeechText))
             {
                 OnFinalTranscriptionReady?.Invoke(_currentSpeechText.Trim());
-                _currentSpeechText = ""; // reset pour le prochain segment
+                _currentSpeechText = ""; 
             }
         }
     }
@@ -361,7 +357,6 @@ public class ASRManager : MonoBehaviour
     }
     private void SaveRecording()
     {
-        // Vérifier s'il y a quelque chose à sauvegarder
         if (_currentSpeechAudioData == null || _currentSpeechAudioData.Count == 0 || string.IsNullOrWhiteSpace(_currentSpeechText))
         {
             Debug.Log("[ASRManager] Pas de données audio ou de texte à sauvegarder.");
@@ -370,7 +365,6 @@ public class ASRManager : MonoBehaviour
 
         try
         {
-            // 1. Préparer les données et les chemins
             string timeStamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string audioFileName = $"recording_{timeStamp}.wav";
             string textFileName = $"transcription_{timeStamp}.txt";
@@ -380,21 +374,16 @@ public class ASRManager : MonoBehaviour
 
             string finalizedText = _currentSpeechText.Trim();
 
-            // 2. Sauvegarder le fichier texte
             File.WriteAllText(textPath, finalizedText);
             Debug.Log($"[ASRManager] Transcription sauvegardée : {textPath}");
 
-            // 3. Sauvegarder le fichier audio
-            // Créer un AudioClip temporaire avec nos données
             float[] audioData = _currentSpeechAudioData.ToArray();
             AudioClip segmentClip = AudioClip.Create("SpeechSegment", audioData.Length, 1, TARGET_SAMPLE_RATE, false);
             segmentClip.SetData(audioData, 0);
 
-            // Sauvegarder en .wav
             SaveToWav(audioPath, segmentClip);
             Debug.Log($"[ASRManager] Audio sauvegardé : {audioPath}");
             
-            // Nettoyer l'AudioClip temporaire
             Destroy(segmentClip);
         }
         catch (Exception e)
@@ -403,9 +392,6 @@ public class ASRManager : MonoBehaviour
         }
     }
 
-    // --- NOUVEAU : Utilitaire de sauvegarde WAV ---
-    // Cet utilitaire convertit un AudioClip en fichier .wav
-    // (Source : Adapté de diverses solutions open-source Unity)
     private static void SaveToWav(string filePath, AudioClip clip)
     {
         using (var fileStream = new FileStream(filePath, FileMode.Create))
@@ -415,10 +401,8 @@ public class ASRManager : MonoBehaviour
                 var pcmData = new float[clip.samples * clip.channels];
                 clip.GetData(pcmData, 0);
 
-                // Écrire l'en-tête WAV
                 WriteWavHeader(writer, clip.channels, clip.frequency, pcmData.Length);
                 
-                // Convertir float en PCM 16-bit
                 foreach (var sample in pcmData)
                 {
                     var pcmSample = (short)(sample * short.MaxValue);
@@ -435,21 +419,20 @@ public class ASRManager : MonoBehaviour
         int dataChunkSize = sampleCount * channels * bytesPerSample;
         int fileSize = 36 + dataChunkSize;
 
-        // "RIFF"
         writer.Write(new char[4] { 'R', 'I', 'F', 'F' });
         writer.Write(fileSize);
-        // "WAVE"
+
         writer.Write(new char[4] { 'W', 'A', 'V', 'E' });
-        // "fmt "
+
         writer.Write(new char[4] { 'f', 'm', 't', ' ' });
-        writer.Write(16); // Taille du sous-chunk fmt
-        writer.Write((short)1); // Format audio (1 = PCM)
+        writer.Write(16); 
+        writer.Write((short)1);
         writer.Write((short)channels);
         writer.Write(frequency);
-        writer.Write(frequency * channels * bytesPerSample); // byteRate
-        writer.Write((short)(channels * bytesPerSample)); // blockAlign
+        writer.Write(frequency * channels * bytesPerSample); 
+        writer.Write((short)(channels * bytesPerSample)); 
         writer.Write((short)bitDepth);
-        // "data"
+        
         writer.Write(new char[4] { 'd', 'a', 't', 'a' });
         writer.Write(dataChunkSize);
     }
