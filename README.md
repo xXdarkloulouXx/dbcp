@@ -44,7 +44,7 @@ git lfs install
 Then clone the repository normally (do **not** use "Download ZIP"):
 
 ```bash
-git clone https://github.com/<org-or-user>/dbcp.git
+git clone https://github.com/xXdarkloulouXx/dbcp.git
 cd dbcp
 ```
 
