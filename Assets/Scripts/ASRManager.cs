@@ -87,8 +87,8 @@ public class ASRManager : MonoBehaviour
     {
         UpdateFPS();
 
-        if (!isListening) return; 
-        
+        if (!isListening) return;
+
         if (_currentState == State.Idle || _currentState == State.Speaking)
         {
             ReadMicrophoneData();
@@ -99,8 +99,31 @@ public class ASRManager : MonoBehaviour
         ProcessResultQueues();
     }
 
-    public void PauseListening() => isListening = false;
-    public void ResumeListening() => isListening = true;
+    public void PauseListening()
+    {
+        isListening = false;
+        // On nettoie les files d'attente pour ne pas traiter de vieux résultats au réveil
+        _partialResultsQueue.Clear();
+        if (partialResultText != null) partialResultText.text = "";
+    }
+
+    public void ResumeListening()
+    {
+        // CRITIQUE : On ignore tout ce qui a été enregistré pendant la pause (la voix du TTS)
+        if (!string.IsNullOrEmpty(_selectedMicrophone) && Microphone.IsRecording(_selectedMicrophone))
+        {
+            _lastPosition = Microphone.GetPosition(_selectedMicrophone);
+        }
+
+        // On vide les buffers internes pour repartir sur une base saine et silencieuse
+        _microphoneCircularBuffer.Clear();
+        _preSpeechCircularBuffer.Clear();
+
+        // On réactive la boucle Update
+        isListening = true;
+
+        Debug.Log("[ASRManager] Écoute reprise (Buffer purgé).");
+    }
 
     private void OnDestroy()
     {
@@ -225,7 +248,7 @@ public class ASRManager : MonoBehaviour
         {
             _currentSpeechAudioData.AddRange(audioChunk);
         }
-        
+
         _activeRunner.ProcessAudioChunk(audioChunk);
     }
 
@@ -246,18 +269,20 @@ public class ASRManager : MonoBehaviour
         {
             float[] preSpeechData = new float[preSpeechDataLength];
             _preSpeechCircularBuffer.Read(preSpeechData, preSpeechDataLength);
-            
+
             int offset = 0;
-            while(offset < preSpeechData.Length)
+            while (offset < preSpeechData.Length)
             {
                 int length = Mathf.Min(HOP_SIZE, preSpeechData.Length - offset);
                 Array.Copy(preSpeechData, offset, _reusableProcessChunk, 0, length);
-                if(length < HOP_SIZE)
+                if (length < HOP_SIZE)
                 {
                     var tempChunk = new float[length];
                     Array.Copy(_reusableProcessChunk, tempChunk, length);
                     FeedAudioToRunner(tempChunk);
-                } else {
+                }
+                else
+                {
                     FeedAudioToRunner(_reusableProcessChunk);
                     //_activeRunner.ProcessAudioChunk(_reusableProcessChunk);
                 }
@@ -284,28 +309,28 @@ public class ASRManager : MonoBehaviour
         if (!string.IsNullOrWhiteSpace(final))
         {
             _currentSpeechText += final + " ";
-             _finalResultsQueue.Enqueue(final);
+            _finalResultsQueue.Enqueue(final);
         }
         if (_isAwaitingFinalResult)
         {
             SaveRecording();
-            _isAwaitingFinalResult = false; 
+            _isAwaitingFinalResult = false;
 
             if (!string.IsNullOrWhiteSpace(_currentSpeechText))
             {
                 OnFinalTranscriptionReady?.Invoke(_currentSpeechText.Trim());
-                _currentSpeechText = ""; 
+                _currentSpeechText = "";
             }
         }
     }
-    
+
     private void ProcessResultQueues()
     {
         if (_partialResultsQueue.TryDequeue(out string partialResult))
         {
             if (partialResultText != null) partialResultText.text = partialResult;
         }
-        
+
         if (_finalResultsQueue.TryDequeue(out string finalResult))
         {
             Debug.Log($"[Final Result]: {finalResult}");
@@ -368,7 +393,7 @@ public class ASRManager : MonoBehaviour
             string timeStamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string audioFileName = $"recording_{timeStamp}.wav";
             string textFileName = $"transcription_{timeStamp}.txt";
-            
+
             string audioPath = Path.Combine(Application.persistentDataPath, audioFileName);
             string textPath = Path.Combine(Application.persistentDataPath, textFileName);
 
@@ -383,7 +408,7 @@ public class ASRManager : MonoBehaviour
 
             SaveToWav(audioPath, segmentClip);
             Debug.Log($"[ASRManager] Audio sauvegardé : {audioPath}");
-            
+
             Destroy(segmentClip);
         }
         catch (Exception e)
@@ -402,7 +427,7 @@ public class ASRManager : MonoBehaviour
                 clip.GetData(pcmData, 0);
 
                 WriteWavHeader(writer, clip.channels, clip.frequency, pcmData.Length);
-                
+
                 foreach (var sample in pcmData)
                 {
                     var pcmSample = (short)(sample * short.MaxValue);
@@ -425,14 +450,14 @@ public class ASRManager : MonoBehaviour
         writer.Write(new char[4] { 'W', 'A', 'V', 'E' });
 
         writer.Write(new char[4] { 'f', 'm', 't', ' ' });
-        writer.Write(16); 
+        writer.Write(16);
         writer.Write((short)1);
         writer.Write((short)channels);
         writer.Write(frequency);
-        writer.Write(frequency * channels * bytesPerSample); 
-        writer.Write((short)(channels * bytesPerSample)); 
+        writer.Write(frequency * channels * bytesPerSample);
+        writer.Write((short)(channels * bytesPerSample));
         writer.Write((short)bitDepth);
-        
+
         writer.Write(new char[4] { 'd', 'a', 't', 'a' });
         writer.Write(dataChunkSize);
     }
@@ -472,7 +497,7 @@ public class ASRManager : MonoBehaviour
             }
             Count -= length;
         }
-        
+
         public void Clear()
         {
             _head = 0;

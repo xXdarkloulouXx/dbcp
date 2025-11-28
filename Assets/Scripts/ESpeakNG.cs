@@ -21,7 +21,7 @@ public static class ESpeakNG
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     public static extern int espeak_Synth(byte[] text, int size, uint position, int positionType, uint endPosition, uint flags, IntPtr uniqueIdentifier, IntPtr userData);
-    
+
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     public static extern int espeak_GetSampleRate();
 
