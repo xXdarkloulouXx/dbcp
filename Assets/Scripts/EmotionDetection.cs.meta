@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: 73940f164c2af86459edbe50f275395e
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - onnxModelAsset: {fileID: 5022602860645237092, guid: 1d270741557654546a639cc73e4cf2a5, type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 

@@ -7,6 +7,7 @@ using System.Collections.Concurrent;
 using UnityEngine;
 using LLMUnity;
 using System.Text.RegularExpressions;
+using System.Linq;
 
 /// <summary>
 /// GeneralManager orchestrates the interaction between speech recognition (ASR), language model (LLM), and text-to-speech (Piper).
@@ -21,6 +22,7 @@ public class GeneralManager : MonoBehaviour
     public LLMCharacter llmCharacter;      // Language model character for generating responses
     public PiperManager piper;              // Text-to-speech engine for speaking responses
     public ASRManager asrManager;           // Automatic speech recognition for user input
+    public EmotionDetection emotionDetection;
 
     /// <summary>Thread-safe queue for managing speech tasks to be synthesized.</summary>
     private readonly ConcurrentQueue<SpeechTask> _speechTaskQueue = new ConcurrentQueue<SpeechTask>();
@@ -37,32 +39,46 @@ public class GeneralManager : MonoBehaviour
     async void Start()
     {
         // Validate all required components are assigned in the Inspector
-        if (llmCharacter == null || piper == null || asrManager == null)
+        if (llmCharacter == null || piper == null || asrManager == null || emotionDetection == null)
         {
-            Debug.LogError("[GeneralManager] Assign LLMCharacter, PiperManager & ASRManager in inspector.");
+            Debug.LogError("[GeneralManager] Assign all components in inspector.");
             return;
         }
 
-        // Subscribe to ASR transcription events - when user finishes speaking, send to LLM
+        // <--- Abonnement à l'événement de fin de transcription ASR
         asrManager.OnFinalTranscriptionReady += async (transcription) =>
         {
-            if (!string.IsNullOrEmpty(transcription))
+            if (string.IsNullOrEmpty(transcription)) return;
+
+            string detectedEmotion = "neutral";
+
+            // On récupère le dernier WAV enregistré par ASR
+            string lastWavPath = Directory.GetFiles(Application.persistentDataPath, "recording_*.wav")
+                                        .OrderByDescending(f => File.GetCreationTime(f))
+                                        .FirstOrDefault();
+            if (!string.IsNullOrEmpty(lastWavPath))
             {
-                Debug.Log($"[GeneralManager] Sending ASR transcription to LLM: {transcription}");
-                await SendPromptToLLM(transcription);
+                bool emotionDetected = false;
+                emotionDetection.AnalyzeAudio(lastWavPath, (emotion) =>
+                {
+                    detectedEmotion = emotion;
+                    emotionDetected = true;
+                });
+
+                // On attend que l'émotion soit détectée
+                while (!emotionDetected) await System.Threading.Tasks.Task.Yield();
             }
+
+            // On enrichit le prompt avec l'émotion
+            string enrichedPrompt = $"{transcription}\n(User emotion: {detectedEmotion})";
+            Debug.Log($"[GeneralManager] Sending enriched prompt to LLM: {enrichedPrompt}");
+            await SendPromptToLLM(enrichedPrompt);
         };
 
-        Debug.Log("[GeneralManager] In-memory queue ready.");
+        StartCoroutine(ProcessSpeechQueue());
 
-        // Send initial greeting to start the conversation
         if (!string.IsNullOrEmpty(initialPrompt))
             await SendPromptToLLM(initialPrompt);
-        else
-            Debug.LogWarning("[GeneralManager] Initial prompt is empty; conversation will start on user input.");
-
-        // Start the coroutine that processes queued speech tasks
-        StartCoroutine(ProcessSpeechQueue());
     }
 
     /// <summary>
