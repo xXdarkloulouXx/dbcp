@@ -950,7 +950,7 @@ MonoBehaviour:
   m_GameObject: {fileID: 468843313}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 01db3451110645e409bdd9ac3b6fbacf, type: 3}
+  m_Script: {fileID: 11500000, guid: ccf2ee9c75e042c47bbc95a8cf476fe6, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   initialPrompt: Say hello and ask me how I am today.
@@ -2042,7 +2042,7 @@ MonoBehaviour:
   advancedOptions: 0
   remote: 0
   port: 13333
-  numThreads: -1
+  numThreads: 2
   numGPULayers: 0
   debug: 0
   parallelPrompts: -1
@@ -2426,7 +2426,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   vadThreshold: 0.5
-  _currentVadProbability: 1
   preBufferFrames: 20
   postBufferFrames: 10
   maxRecordingSeconds: 10

@@ -133,30 +133,29 @@ public class EmotionDetection : MonoBehaviour
         // ----------------------------------------
         // Inference
         // ----------------------------------------
-        using (Tensor<float> inputTensor = new Tensor<float>(new TensorShape(1, ExpectedFeatureCount), features)) 
-        { 
-            inferenceEngine.Schedule(inputTensor); 
-            
-            using (Tensor<float> output = inferenceEngine.PeekOutput() as Tensor<float>) 
-            { 
-                output.ReadbackRequest(); 
-                while (!output.IsReadbackRequestDone()) yield return null; 
-                
-                float[] logits = output.DownloadToArray(); 
-                
-                // DEBUG 3 — print logits 
-                string lstring = ""; 
-                foreach (float l in logits) lstring += l.ToString("F3") + ", "; 
-                Debug.Log($"[EMO DEBUG] Logits: {lstring}"); 
-                
-                // Softmax 
-                float[] probs = Softmax(logits); 
-                
-                int maxIndex = GetMaxIndex(probs); 
-                callback?.Invoke(emotionList[maxIndex]); 
-            } 
-        }
+        using (Tensor<float> inputTensor = new Tensor<float>(new TensorShape(1, ExpectedFeatureCount), features))
+        {
+            inferenceEngine.Schedule(inputTensor);
 
+            using (Tensor<float> output = inferenceEngine.PeekOutput() as Tensor<float>)
+            {
+                output.ReadbackRequest();
+                while (!output.IsReadbackRequestDone()) yield return null;
+
+                float[] logits = output.DownloadToArray();
+
+                // DEBUG 3 — print logits
+                string lstring = "";
+                foreach (float l in logits) lstring += l.ToString("F3") + ", ";
+                Debug.Log($"[EMO DEBUG] Logits: {lstring}");
+
+                // Softmax
+                float[] probs = Softmax(logits);
+
+                int maxIndex = GetMaxIndex(probs);
+                callback?.Invoke(emotionList[maxIndex]);
+            }
+        }
 
         _isRunning = false;
     }
