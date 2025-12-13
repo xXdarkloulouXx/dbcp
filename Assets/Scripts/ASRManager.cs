@@ -254,7 +254,7 @@ public class ASRManager : MonoBehaviour
                             else
                             {
                                 consecutiveSilenceFrames++;
-                                if (consecutiveSilenceFrames >= postBufferFrames)
+                                if (_currentState != State.Idle && consecutiveSilenceFrames >= postBufferFrames)
                                     EndSpeech(ref isSpeaking, currentSpeechAudio, preSpeechBuffer);
                             }
 
@@ -444,4 +444,5 @@ public class ASRManager : MonoBehaviour
             Count = 0;
         }
     }
+
 }
