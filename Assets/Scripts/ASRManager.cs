@@ -3,9 +3,9 @@ using UnityEngine.UI;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using System.IO;
-
 
 public class ASRManager : MonoBehaviour
 {
@@ -13,11 +13,12 @@ public class ASRManager : MonoBehaviour
     {
         Initializing, Idle, Speaking, Error
     }
-    private State _currentState = State.Initializing;
+    // "volatile" est important pour que la valeur soit à jour entre les threads
+    private volatile State _currentState = State.Initializing;
+    private State _lastUiState = State.Initializing; // Pour détecter le changement dans Update
 
     [Header("VAD Settings")]
     [Range(0f, 1f)] public float vadThreshold = 0.5f;
-    [SerializeField, Range(0f, 1f)] private float _currentVadProbability;
     [Range(1, 50)] public int preBufferFrames = 20;
     [Range(1, 50)] public int postBufferFrames = 20;
     public float maxRecordingSeconds = 10f;
@@ -32,32 +33,23 @@ public class ASRManager : MonoBehaviour
     public Text resultText;
     public Text partialResultText;
 
-    private TenVADRunner _vad;
+    // --- Audio & Threading ---
     private string _selectedMicrophone;
     private AudioClip _microphoneClip;
     private int _lastPosition = 0;
-    private int _consecutiveSilenceFrames = 0;
-    private float _currentRecordingTime = 0f;
+    private string _persistentDataPath;
+
+    private ConcurrentQueue<float[]> _audioInputQueue = new ConcurrentQueue<float[]>();
+    private CancellationTokenSource _cancellationTokenSource;
 
     private const int HOP_SIZE = 256;
     private const int TARGET_SAMPLE_RATE = 16000;
 
-    private CircularBuffer _microphoneCircularBuffer;
-    private CircularBuffer _preSpeechCircularBuffer;
-    private float[] _reusableReadBuffer;
-    private float[] _reusableProcessChunk;
-    private short[] _reusableShortChunk;
-
     private readonly ConcurrentQueue<string> _partialResultsQueue = new ConcurrentQueue<string>();
     private readonly ConcurrentQueue<string> _finalResultsQueue = new ConcurrentQueue<string>();
 
-    private List<float> _currentSpeechAudioData;
-    private string _currentSpeechText;
-
-    private bool _isAwaitingFinalResult = false;
-
+    private string _latestFinalTranscription = "";
     private float deltaTime = 0.0f;
-    private const int MAX_CHUNKS_PER_FRAME = 5;
 
     public bool isListening = true;
     public event Action<string> OnFinalTranscriptionReady;
@@ -67,14 +59,17 @@ public class ASRManager : MonoBehaviour
         SetState(State.Initializing);
         try
         {
-            InitializeBuffers();
-            _currentSpeechAudioData = new List<float>();
-            _currentSpeechText = "";
+            // Capture du chemin sur le Main Thread pour l'utiliser plus tard
+            _persistentDataPath = Application.persistentDataPath;
+
             await InitializeASRRunner();
-            _vad = new TenVADRunner((UIntPtr)HOP_SIZE, vadThreshold);
             InitializeMicrophone();
-            Debug.Log($"[ASRManager] Initialized successfully with '{asrRunnerComponent.GetType().Name}'.");
+
+            Debug.Log($"[ASRManager] Initialized successfully.");
             SetState(State.Idle);
+
+            _cancellationTokenSource = new CancellationTokenSource();
+            _ = Task.Run(() => AudioProcessingLoop(_cancellationTokenSource.Token));
         }
         catch (Exception e)
         {
@@ -87,240 +82,35 @@ public class ASRManager : MonoBehaviour
     {
         UpdateFPS();
 
-        if (!isListening) return; 
-        
-        if (_currentState == State.Idle || _currentState == State.Speaking)
+        // --- SYSTEME DE SÉCURITÉ UI ---
+        // On détecte si l'état a changé depuis la dernière frame
+        // Cela permet au Worker Thread de changer '_currentState' sans toucher à l'UI directement (ce qui ferait crasher)
+        if (_currentState != _lastUiState)
         {
-            ReadMicrophoneData();
-            ProcessAudioChunks();
-            CheckMicrophoneStatus();
+            UpdateUIForState(_currentState);
+            _lastUiState = _currentState;
         }
 
+        if (!isListening) return;
+
+        ReadMicrophoneData();
         ProcessResultQueues();
+        CheckMicrophoneStatus();
     }
 
-    public void PauseListening() => isListening = false;
-    public void ResumeListening() => isListening = true;
-
-    private void OnDestroy()
-    {
-        if (_activeRunner != null)
-        {
-            _activeRunner.OnPartialResult -= OnPartialResultReceived;
-            _activeRunner.OnFinalResult -= OnFinalResultReceived;
-        }
-
-        if (_microphoneClip != null && !string.IsNullOrEmpty(_selectedMicrophone) && Microphone.IsRecording(_selectedMicrophone))
-        {
-            Microphone.End(_selectedMicrophone);
-        }
-        _vad?.Dispose();
-        _activeRunner?.Dispose();
-    }
-
-    private void InitializeBuffers()
-    {
-        _microphoneCircularBuffer = new CircularBuffer(TARGET_SAMPLE_RATE * 2);
-        _preSpeechCircularBuffer = new CircularBuffer(HOP_SIZE * preBufferFrames);
-        _reusableReadBuffer = new float[TARGET_SAMPLE_RATE];
-        _reusableProcessChunk = new float[HOP_SIZE];
-        _reusableShortChunk = new short[HOP_SIZE];
-    }
-
-    private async Task InitializeASRRunner()
-    {
-        if (asrRunnerComponent == null)
-        {
-            throw new ArgumentNullException("ASR Runner Component is not assigned in the Inspector.");
-        }
-        _activeRunner = asrRunnerComponent as IASRRunner;
-        if (_activeRunner == null)
-        {
-            throw new InvalidCastException($"The component '{asrRunnerComponent.GetType().Name}' must implement IASRRunner.");
-        }
-        _activeRunner.OnPartialResult += OnPartialResultReceived;
-        _activeRunner.OnFinalResult += OnFinalResultReceived;
-        await _activeRunner.Initialize();
-    }
-
-    private void InitializeMicrophone()
-    {
-        if (Microphone.devices.Length == 0) throw new InvalidOperationException("No microphone found.");
-        _selectedMicrophone = Microphone.devices[0];
-        _microphoneClip = Microphone.Start(_selectedMicrophone, true, (int)maxRecordingSeconds + 1, TARGET_SAMPLE_RATE);
-        _lastPosition = 0;
-        Debug.Log($"[ASRManager] Started recording from microphone '{_selectedMicrophone}'.");
-    }
-
-    private void ReadMicrophoneData()
-    {
-        if (_microphoneClip == null) return;
-
-        int currentPosition = Microphone.GetPosition(_selectedMicrophone);
-        if (currentPosition == _lastPosition) return;
-
-        int sampleCount = (currentPosition > _lastPosition)
-            ? (currentPosition - _lastPosition)
-            : (_microphoneClip.samples - _lastPosition + currentPosition);
-
-        if (sampleCount > 0)
-        {
-            int readLength = Mathf.Min(sampleCount, _reusableReadBuffer.Length);
-            _microphoneClip.GetData(_reusableReadBuffer, _lastPosition);
-            _microphoneCircularBuffer.Write(_reusableReadBuffer, readLength);
-        }
-        _lastPosition = currentPosition;
-    }
-
-    private void ProcessAudioChunks()
-    {
-        int chunksProcessed = 0;
-        while (_microphoneCircularBuffer.Count >= HOP_SIZE && chunksProcessed < MAX_CHUNKS_PER_FRAME)
-        {
-            _microphoneCircularBuffer.Read(_reusableProcessChunk, HOP_SIZE);
-
-            for (int i = 0; i < HOP_SIZE; i++) _reusableShortChunk[i] = (short)(_reusableProcessChunk[i] * 32767.0f);
-            _vad.Process(_reusableShortChunk, out _currentVadProbability, out int flag);
-            bool voiceDetected = flag == 1;
-
-            switch (_currentState)
-            {
-                case State.Idle:
-                    _preSpeechCircularBuffer.Write(_reusableProcessChunk, HOP_SIZE);
-                    if (voiceDetected)
-                    {
-                        StartSpeech();
-                    }
-                    break;
-
-                case State.Speaking:
-                    FeedAudioToRunner(_reusableProcessChunk);
-                    //_activeRunner.ProcessAudioChunk(_reusableProcessChunk);
-                    _currentRecordingTime += (float)HOP_SIZE / TARGET_SAMPLE_RATE;
-                    if (voiceDetected)
-                    {
-                        _consecutiveSilenceFrames = 0;
-                    }
-                    else
-                    {
-                        _consecutiveSilenceFrames++;
-                        if (_consecutiveSilenceFrames >= postBufferFrames)
-                        {
-                            EndSpeech();
-                        }
-                    }
-                    if (_currentRecordingTime >= maxRecordingSeconds)
-                    {
-                        Debug.Log($"Max recording time ({maxRecordingSeconds}s) reached. Ending speech segment.");
-                        EndSpeech();
-                    }
-                    break;
-            }
-            chunksProcessed++;
-        }
-    }
-    private void FeedAudioToRunner(float[] audioChunk)
-    {
-        if (_currentState == State.Speaking && audioChunk != null)
-        {
-            _currentSpeechAudioData.AddRange(audioChunk);
-        }
-        
-        _activeRunner.ProcessAudioChunk(audioChunk);
-    }
-
-    private void StartSpeech()
-    {
-        SetState(State.Speaking);
-        _currentRecordingTime = 0f;
-        _consecutiveSilenceFrames = 0;
-        _isAwaitingFinalResult = false;
-
-        _currentSpeechAudioData.Clear();
-        _currentSpeechText = "";
-
-        _activeRunner.StartSpeechSegment();
-
-        int preSpeechDataLength = _preSpeechCircularBuffer.Count;
-        if (preSpeechDataLength > 0)
-        {
-            float[] preSpeechData = new float[preSpeechDataLength];
-            _preSpeechCircularBuffer.Read(preSpeechData, preSpeechDataLength);
-            
-            int offset = 0;
-            while(offset < preSpeechData.Length)
-            {
-                int length = Mathf.Min(HOP_SIZE, preSpeechData.Length - offset);
-                Array.Copy(preSpeechData, offset, _reusableProcessChunk, 0, length);
-                if(length < HOP_SIZE)
-                {
-                    var tempChunk = new float[length];
-                    Array.Copy(_reusableProcessChunk, tempChunk, length);
-                    FeedAudioToRunner(tempChunk);
-                } else {
-                    FeedAudioToRunner(_reusableProcessChunk);
-                    //_activeRunner.ProcessAudioChunk(_reusableProcessChunk);
-                }
-                offset += length;
-            }
-        }
-        FeedAudioToRunner(_reusableProcessChunk);
-        //_activeRunner.ProcessAudioChunk(_reusableProcessChunk);
-    }
-
-    private void EndSpeech()
-    {
-        if (_currentState != State.Speaking) return;
-
-        _activeRunner.EndSpeechSegment();
-        _isAwaitingFinalResult = true;
-        _preSpeechCircularBuffer.Clear();
-        SetState(State.Idle);
-    }
-
-    private void OnPartialResultReceived(string partial) => _partialResultsQueue.Enqueue(partial);
-    private void OnFinalResultReceived(string final)
-    {
-        if (!string.IsNullOrWhiteSpace(final))
-        {
-            _currentSpeechText += final + " ";
-             _finalResultsQueue.Enqueue(final);
-        }
-        if (_isAwaitingFinalResult)
-        {
-            SaveRecording();
-            _isAwaitingFinalResult = false; 
-
-            if (!string.IsNullOrWhiteSpace(_currentSpeechText))
-            {
-                OnFinalTranscriptionReady?.Invoke(_currentSpeechText.Trim());
-                _currentSpeechText = ""; 
-            }
-        }
-    }
-    
-    private void ProcessResultQueues()
-    {
-        if (_partialResultsQueue.TryDequeue(out string partialResult))
-        {
-            if (partialResultText != null) partialResultText.text = partialResult;
-        }
-        
-        if (_finalResultsQueue.TryDequeue(out string finalResult))
-        {
-            Debug.Log($"[Final Result]: {finalResult}");
-            if (resultText != null) resultText.text += finalResult + " ";
-            if (partialResultText != null) partialResultText.text = "";
-        }
-    }
-
+    // --- CORRECTION ICI ---
+    // On retire le check "IsMainThread" qui causait l'erreur.
+    // On change juste la variable, et Update() s'occupera de l'affichage.
     private void SetState(State newState)
     {
-        if (_currentState == newState) return;
         _currentState = newState;
+    }
 
+    private void UpdateUIForState(State state)
+    {
         if (statusText == null) return;
-        switch (newState)
+
+        switch (state)
         {
             case State.Initializing:
                 statusText.text = "Initializing...";
@@ -341,6 +131,228 @@ public class ASRManager : MonoBehaviour
         }
     }
 
+    private void InitializeMicrophone()
+    {
+        if (Microphone.devices.Length == 0) throw new InvalidOperationException("No microphone found.");
+        _selectedMicrophone = Microphone.devices[0];
+        _microphoneClip = Microphone.Start(_selectedMicrophone, true, 12, TARGET_SAMPLE_RATE);
+        _lastPosition = 0;
+        Debug.Log($"[ASRManager] Started recording from microphone '{_selectedMicrophone}'.");
+    }
+
+    private void ReadMicrophoneData()
+    {
+        if (_microphoneClip == null) return;
+
+        int currentPosition = Microphone.GetPosition(_selectedMicrophone);
+        if (currentPosition == _lastPosition) return;
+
+        int sampleCount = (currentPosition > _lastPosition)
+            ? (currentPosition - _lastPosition)
+            : (_microphoneClip.samples - _lastPosition + currentPosition);
+
+        if (sampleCount > 0)
+        {
+            float[] chunk = new float[sampleCount];
+            _microphoneClip.GetData(chunk, _lastPosition);
+            _audioInputQueue.Enqueue(chunk);
+        }
+        _lastPosition = currentPosition;
+    }
+
+    private void ProcessResultQueues()
+    {
+        if (_partialResultsQueue.TryDequeue(out string partialResult))
+        {
+            if (partialResultText != null) partialResultText.text = partialResult;
+        }
+
+        if (_finalResultsQueue.TryDequeue(out string finalResult))
+        {
+            if (resultText != null) resultText.text += finalResult + " ";
+            if (partialResultText != null) partialResultText.text = "";
+
+            OnFinalTranscriptionReady?.Invoke(_latestFinalTranscription.Trim());
+            _latestFinalTranscription = "";
+        }
+    }
+
+    public void PauseListening()
+    {
+        isListening = false;
+        _partialResultsQueue.Clear();
+        if (partialResultText != null) partialResultText.text = "";
+    }
+
+    public void ResumeListening()
+    {
+        if (!string.IsNullOrEmpty(_selectedMicrophone) && Microphone.IsRecording(_selectedMicrophone))
+        {
+            _lastPosition = Microphone.GetPosition(_selectedMicrophone);
+        }
+        while (_audioInputQueue.TryDequeue(out _)) { }
+        isListening = true;
+    }
+
+    private void AudioProcessingLoop(CancellationToken token)
+    {
+        // Pense à vérifier que tu as bien "using Ten;" ou le bon namespace en haut si TenVADRunner n'est pas reconnu
+        TenVADRunner vad = new TenVADRunner((UIntPtr)HOP_SIZE, vadThreshold);
+        CircularBuffer preSpeechBuffer = new CircularBuffer(HOP_SIZE * preBufferFrames);
+        List<float> currentSpeechAudio = new List<float>();
+        List<float> accumulationBuffer = new List<float>();
+
+        float[] processChunk = new float[HOP_SIZE];
+        short[] shortChunk = new short[HOP_SIZE];
+
+        float currentRecordingTime = 0f;
+        int consecutiveSilenceFrames = 0;
+        bool isSpeaking = false;
+
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (_audioInputQueue.TryDequeue(out float[] newAudio))
+                {
+                    accumulationBuffer.AddRange(newAudio);
+
+                    while (accumulationBuffer.Count >= HOP_SIZE)
+                    {
+                        accumulationBuffer.CopyTo(0, processChunk, 0, HOP_SIZE);
+                        accumulationBuffer.RemoveRange(0, HOP_SIZE);
+
+                        for (int i = 0; i < HOP_SIZE; i++) shortChunk[i] = (short)(processChunk[i] * 32767.0f);
+                        vad.Process(shortChunk, out float prob, out int flag);
+                        bool voiceDetected = flag == 1;
+
+                        if (!isSpeaking)
+                        {
+                            preSpeechBuffer.Write(processChunk, HOP_SIZE);
+                            if (voiceDetected)
+                            {
+                                isSpeaking = true;
+                                _currentState = State.Speaking; // Le Update() principal verra ça et changera la couleur
+
+                                currentSpeechAudio.Clear();
+                                currentRecordingTime = 0f;
+                                consecutiveSilenceFrames = 0;
+
+                                _activeRunner.StartSpeechSegment();
+
+                                float[] preData = preSpeechBuffer.ReadAll();
+                                FeedRunner(preData, currentSpeechAudio);
+                                FeedRunner(processChunk, currentSpeechAudio);
+                            }
+                        }
+                        else
+                        {
+                            FeedRunner(processChunk, currentSpeechAudio);
+                            currentRecordingTime += (float)HOP_SIZE / TARGET_SAMPLE_RATE;
+
+                            if (voiceDetected) consecutiveSilenceFrames = 0;
+                            else
+                            {
+                                consecutiveSilenceFrames++;
+                                if (consecutiveSilenceFrames >= postBufferFrames)
+                                    EndSpeech(ref isSpeaking, currentSpeechAudio, preSpeechBuffer);
+                            }
+
+                            if (currentRecordingTime >= maxRecordingSeconds)
+                                EndSpeech(ref isSpeaking, currentSpeechAudio, preSpeechBuffer);
+                        }
+                    }
+                }
+                else
+                {
+                    Thread.Sleep(5);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[ASR Worker] Crashed: {e.Message}");
+        }
+        finally
+        {
+            vad.Dispose();
+        }
+    }
+
+    private void FeedRunner(float[] chunk, List<float> storage)
+    {
+        storage.AddRange(chunk);
+        _activeRunner.ProcessAudioChunk(chunk);
+    }
+
+    private void EndSpeech(ref bool isSpeaking, List<float> audioData, CircularBuffer preBuffer)
+    {
+        if (!isSpeaking) return;
+
+        isSpeaking = false;
+        _activeRunner.EndSpeechSegment();
+        _currentState = State.Idle;
+
+        SaveRecordingWorker(audioData);
+        preBuffer.Clear();
+    }
+
+    private void SaveRecordingWorker(List<float> audioData)
+    {
+        if (audioData.Count == 0) return;
+
+        try
+        {
+            string timeStamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string audioPath = Path.Combine(_persistentDataPath, $"recording_{timeStamp}.wav");
+
+            using (var fileStream = new FileStream(audioPath, FileMode.Create))
+            using (var writer = new BinaryWriter(fileStream))
+            {
+                WriteWavHeader(writer, 1, TARGET_SAMPLE_RATE, audioData.Count);
+                foreach (var sample in audioData)
+                {
+                    var pcmSample = (short)(Mathf.Clamp(sample, -1f, 1f) * short.MaxValue);
+                    writer.Write(pcmSample);
+                }
+            }
+            Debug.Log($"[ASR Worker] Saved audio: {audioPath}");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[ASR Worker] Save error: {e.Message}");
+        }
+    }
+
+    private async Task InitializeASRRunner()
+    {
+        if (asrRunnerComponent == null) throw new ArgumentNullException("ASR Runner Component is not assigned.");
+        _activeRunner = asrRunnerComponent as IASRRunner;
+        if (_activeRunner == null) throw new InvalidCastException($"Component must implement IASRRunner.");
+
+        _activeRunner.OnPartialResult += (partial) => _partialResultsQueue.Enqueue(partial);
+        _activeRunner.OnFinalResult += (final) =>
+        {
+            if (!string.IsNullOrWhiteSpace(final))
+            {
+                _latestFinalTranscription = final;
+                _finalResultsQueue.Enqueue(final);
+            }
+        };
+
+        await _activeRunner.Initialize();
+    }
+
+    private void OnDestroy()
+    {
+        _cancellationTokenSource?.Cancel();
+        if (!string.IsNullOrEmpty(_selectedMicrophone) && Microphone.IsRecording(_selectedMicrophone))
+        {
+            Microphone.End(_selectedMicrophone);
+        }
+        _activeRunner?.Dispose();
+    }
+
     private void UpdateFPS()
     {
         deltaTime += (Time.unscaledDeltaTime - deltaTime) * 0.1f;
@@ -349,66 +361,9 @@ public class ASRManager : MonoBehaviour
 
     private void CheckMicrophoneStatus()
     {
-        if (!string.IsNullOrEmpty(_selectedMicrophone) && !Microphone.IsRecording(_selectedMicrophone))
+        if (!string.IsNullOrEmpty(_selectedMicrophone) && !Microphone.IsRecording(_selectedMicrophone) && isListening)
         {
-            Debug.LogWarning($"[ASRManager] Microphone '{_selectedMicrophone}' stopped recording. Attempting to restart.");
             InitializeMicrophone();
-        }
-    }
-    private void SaveRecording()
-    {
-        if (_currentSpeechAudioData == null || _currentSpeechAudioData.Count == 0 || string.IsNullOrWhiteSpace(_currentSpeechText))
-        {
-            Debug.Log("[ASRManager] Pas de données audio ou de texte à sauvegarder.");
-            return;
-        }
-
-        try
-        {
-            string timeStamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string audioFileName = $"recording_{timeStamp}.wav";
-            string textFileName = $"transcription_{timeStamp}.txt";
-            
-            string audioPath = Path.Combine(Application.persistentDataPath, audioFileName);
-            string textPath = Path.Combine(Application.persistentDataPath, textFileName);
-
-            string finalizedText = _currentSpeechText.Trim();
-
-            File.WriteAllText(textPath, finalizedText);
-            Debug.Log($"[ASRManager] Transcription sauvegardée : {textPath}");
-
-            float[] audioData = _currentSpeechAudioData.ToArray();
-            AudioClip segmentClip = AudioClip.Create("SpeechSegment", audioData.Length, 1, TARGET_SAMPLE_RATE, false);
-            segmentClip.SetData(audioData, 0);
-
-            SaveToWav(audioPath, segmentClip);
-            Debug.Log($"[ASRManager] Audio sauvegardé : {audioPath}");
-            
-            Destroy(segmentClip);
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[ASRManager] Échec de la sauvegarde de l'enregistrement : {e.Message}");
-        }
-    }
-
-    private static void SaveToWav(string filePath, AudioClip clip)
-    {
-        using (var fileStream = new FileStream(filePath, FileMode.Create))
-        {
-            using (var writer = new BinaryWriter(fileStream))
-            {
-                var pcmData = new float[clip.samples * clip.channels];
-                clip.GetData(pcmData, 0);
-
-                WriteWavHeader(writer, clip.channels, clip.frequency, pcmData.Length);
-                
-                foreach (var sample in pcmData)
-                {
-                    var pcmSample = (short)(sample * short.MaxValue);
-                    writer.Write(pcmSample);
-                }
-            }
         }
     }
 
@@ -421,18 +376,15 @@ public class ASRManager : MonoBehaviour
 
         writer.Write(new char[4] { 'R', 'I', 'F', 'F' });
         writer.Write(fileSize);
-
         writer.Write(new char[4] { 'W', 'A', 'V', 'E' });
-
         writer.Write(new char[4] { 'f', 'm', 't', ' ' });
-        writer.Write(16); 
+        writer.Write(16);
         writer.Write((short)1);
         writer.Write((short)channels);
         writer.Write(frequency);
-        writer.Write(frequency * channels * bytesPerSample); 
-        writer.Write((short)(channels * bytesPerSample)); 
+        writer.Write(frequency * channels * bytesPerSample);
+        writer.Write((short)(channels * bytesPerSample));
         writer.Write((short)bitDepth);
-        
         writer.Write(new char[4] { 'd', 'a', 't', 'a' });
         writer.Write(dataChunkSize);
     }
@@ -472,7 +424,19 @@ public class ASRManager : MonoBehaviour
             }
             Count -= length;
         }
-        
+
+        public float[] ReadAll()
+        {
+            float[] allData = new float[Count];
+            int tempHead = _head;
+            for (int i = 0; i < Count; i++)
+            {
+                allData[i] = _buffer[tempHead];
+                tempHead = (tempHead + 1) % _capacity;
+            }
+            return allData;
+        }
+
         public void Clear()
         {
             _head = 0;
@@ -481,4 +445,3 @@ public class ASRManager : MonoBehaviour
         }
     }
 }
-
