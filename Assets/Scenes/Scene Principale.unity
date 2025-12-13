@@ -2042,7 +2042,7 @@ MonoBehaviour:
   advancedOptions: 0
   remote: 0
   port: 13333
-  numThreads: -1
+  numThreads: 4
   numGPULayers: 0
   debug: 0
   parallelPrompts: -1
@@ -2426,7 +2426,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   vadThreshold: 0.5
-  _currentVadProbability: 1
   preBufferFrames: 20
   postBufferFrames: 10
   maxRecordingSeconds: 10

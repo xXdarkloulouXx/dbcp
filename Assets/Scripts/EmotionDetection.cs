@@ -1,4 +1,3 @@
-// --- DIAGNOSTIC VERSION (no behavior change) ---
 using UnityEngine;
 using System;
 using System.IO;
@@ -8,6 +7,7 @@ using UnityEngine.Networking;
 using AudEERING.openSMILE;
 using Unity.InferenceEngine;
 using System.Globalization;
+using System.Threading.Tasks;
 
 public class EmotionDetection : MonoBehaviour
 {
@@ -41,6 +41,7 @@ public class EmotionDetection : MonoBehaviour
 
     private void Start()
     {
+        // CPU Backend is safer for threading mixed with Unity logic
         Model runtimeModel = ModelLoader.Load(modelAsset);
         inferenceEngine = new Worker(runtimeModel, BackendType.CPU);
 
@@ -56,43 +57,45 @@ public class EmotionDetection : MonoBehaviour
             return;
         }
 
-        StartCoroutine(ProcessAudioAnalysis(wavFilePath, callback));
+        // Launch async analysis
+        StartCoroutine(AnalyzeAudioRoutine(wavFilePath, callback));
     }
 
-    private IEnumerator ProcessAudioAnalysis(string wavPath, Action<string> callback)
+    private IEnumerator AnalyzeAudioRoutine(string wavPath, Action<string> callback)
     {
         _isRunning = true;
 
+        // Run the heavy lifting on a thread pool thread
+        Task<string> analysisTask = Task.Run(() => PerformAnalysisWorker(wavPath));
+
+        // Yield until the task is complete (allows Unity to keep rendering frames)
+        yield return new WaitUntil(() => analysisTask.IsCompleted);
+
+        _isRunning = false;
+
+        if (analysisTask.Status == TaskStatus.RanToCompletion)
+        {
+            string result = analysisTask.Result;
+            callback?.Invoke(result);
+        }
+        else
+        {
+            Debug.LogError($"[EmotionDetection] Analysis failed: {analysisTask.Exception}");
+            callback?.Invoke("Error");
+        }
+    }
+
+    // --- WORKER THREAD METHOD ---
+    // Contains NO Unity API calls (except Debug which is thread-safe)
+    private string PerformAnalysisWorker(string wavPath)
+    {
         string csvPath = wavPath + ".csv";
 
-        if (File.Exists(csvPath))
-            File.Delete(csvPath);
-
-        // ----------------------------------------
-        // DEBUG 1 — Audio properties
-        // ----------------------------------------
         try
         {
-            float[] samples;
-            int channels;
-            int frequency;
+            if (File.Exists(csvPath)) File.Delete(csvPath);
 
-            samples = LoadWavSamples(wavPath, out channels, out frequency);
-            Debug.Log($"[EMO DEBUG] WAV: samples={samples.Length}  channels={channels}  rate={frequency}");
-
-            float maxAmp = 0f;
-            foreach (float s in samples)
-                if (Mathf.Abs(s) > maxAmp) maxAmp = Mathf.Abs(s);
-
-            Debug.Log($"[EMO DEBUG] WAV max amplitude = {maxAmp}");
-        }
-        catch (Exception e) { Debug.Log($"[EMO DEBUG] Could not read wav for diagnostics: {e.Message}"); }
-
-        // ----------------------------------------
-        // openSMILE
-        // ----------------------------------------
-        try
-        {
+            // 1. Run OpenSMILE (File I/O + Signal Processing)
             using (OpenSMILE smile = new OpenSMILE())
             {
                 var options = new Dictionary<string, string>();
@@ -103,77 +106,43 @@ public class EmotionDetection : MonoBehaviour
                 smile.Initialize(configPath, options, 0);
                 smile.Run();
             }
+
+            // 2. Parse CSV (File I/O)
+            float[] features = ReadCsvFile(csvPath);
+
+            if (features == null || features.Length != ExpectedFeatureCount)
+            {
+                Debug.LogError("[EmotionDetection] Invalid features generated.");
+                return "Error";
+            }
+
+            // 3. Run Inference
+            // Lock the engine to ensure thread safety
+            lock (inferenceEngine)
+            {
+                using (Tensor<float> inputTensor = new Tensor<float>(new TensorShape(1, ExpectedFeatureCount), features))
+                {
+                    inferenceEngine.Schedule(inputTensor);
+
+                    // ReadbackAndClone is thread-safe on CPU backend
+                    using (Tensor<float> output = (inferenceEngine.PeekOutput() as Tensor<float>).ReadbackAndClone())
+                    {
+                        float[] logits = output.DownloadToArray();
+                        float[] probs = Softmax(logits);
+                        int maxIndex = GetMaxIndex(probs);
+                        return emotionList[maxIndex];
+                    }
+                }
+            }
         }
         catch (Exception e)
         {
-            Debug.LogError("OpenSMILE ERROR: " + e.Message);
-            callback?.Invoke("Error");
-            _isRunning = false;
-            yield break;
+            Debug.LogError($"[EmotionDetection] Worker Error: {e.Message}");
+            return "Error";
         }
-
-        // ----------------------------------------
-        // Features
-        // ----------------------------------------
-        float[] features = ReadCsvFile(csvPath);
-
-        if (features == null || features.Length != ExpectedFeatureCount)
-        {
-            Debug.LogError("[EMO DEBUG] Invalid feature count");
-            callback?.Invoke("Error");
-            _isRunning = false;
-            yield break;
-        }
-
-        // DEBUG 2 — print first 10 features
-        string fstring = "";
-        for (int i = 0; i < 10; i++) fstring += features[i].ToString("F3") + ", ";
-        Debug.Log($"[EMO DEBUG] First 10 features: {fstring}");
-
-        // ----------------------------------------
-        // Inference
-        // ----------------------------------------
-        using (Tensor<float> inputTensor = new Tensor<float>(new TensorShape(1, ExpectedFeatureCount), features)) 
-        { 
-            inferenceEngine.Schedule(inputTensor); 
-            
-            using (Tensor<float> output = inferenceEngine.PeekOutput() as Tensor<float>) 
-            { 
-                output.ReadbackRequest(); 
-                while (!output.IsReadbackRequestDone()) yield return null; 
-                
-                float[] logits = output.DownloadToArray(); 
-                
-                // DEBUG 3 — print logits 
-                string lstring = ""; 
-                foreach (float l in logits) lstring += l.ToString("F3") + ", "; 
-                Debug.Log($"[EMO DEBUG] Logits: {lstring}"); 
-                
-                // Softmax 
-                float[] probs = Softmax(logits); 
-                
-                int maxIndex = GetMaxIndex(probs); 
-                callback?.Invoke(emotionList[maxIndex]); 
-            } 
-        }
-
-
-        _isRunning = false;
     }
 
-    // ----------------------------
-    // WAV LOADER (minimal)
-    // ----------------------------
-    private float[] LoadWavSamples(string path, out int channels, out int frequency)
-    {
-        byte[] bytes = File.ReadAllBytes(path);
-        WAV wav = new WAV(bytes);
-
-        channels = wav.ChannelCount;
-        frequency = wav.Frequency;
-
-        return wav.Samples;
-    }
+    // --- HELPERS (Run on worker thread) ---
 
     private float[] Softmax(float[] logits)
     {
@@ -204,58 +173,11 @@ public class EmotionDetection : MonoBehaviour
         return idx;
     }
 
-    private IEnumerator SetupConfigFiles()
-    {
-        string manifestPath = Application.streamingAssetsPath + "/config_manifest.txt";
-        UnityWebRequest request = UnityWebRequest.Get(manifestPath);
-        yield return request.SendWebRequest();
-
-        if (request.result != UnityWebRequest.Result.Success)
-        {
-            Debug.LogError($"EmotionDetection: Failed to load config manifest: {request.error}");
-            yield break;
-        }
-
-        string manifestText = request.downloadHandler.text;
-
-        foreach (string line in manifestText.Split('\n'))
-        {
-            string file = line.Trim();
-            if (string.IsNullOrEmpty(file)) continue;
-
-            if (file.StartsWith("config/", StringComparison.OrdinalIgnoreCase))
-            {
-                string dest = Application.persistentDataPath + "/" + file;
-                if (!File.Exists(dest))
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(dest));
-
-                    string srcUrl = Application.streamingAssetsPath + "/" + file;
-                    using (UnityWebRequest fileReq = UnityWebRequest.Get(srcUrl))
-                    {
-                        yield return fileReq.SendWebRequest();
-                        if (fileReq.result != UnityWebRequest.Result.Success)
-                        {
-                            Debug.LogError($"Failed to copy config file {file}: {fileReq.error}");
-                            continue;
-                        }
-
-                        File.WriteAllBytes(dest, fileReq.downloadHandler.data);
-                    }
-                }
-            }
-        }
-    }
-
     private float[] ReadCsvFile(string path)
     {
         try
         {
-            if (!File.Exists(path))
-            {
-                Debug.LogError($"EmotionDetection: CSV file not found at path {path}");
-                return null;
-            }
+            if (!File.Exists(path)) return null;
 
             string[] allLines = File.ReadAllLines(path);
             if (allLines.Length < 1) return null;
@@ -264,55 +186,86 @@ public class EmotionDetection : MonoBehaviour
             if (string.IsNullOrEmpty(dataLine)) return null;
 
             string[] columns = dataLine.Split(';');
-            int dataCount = columns.Length - 2;
+            int dataCount = columns.Length - 2; // Skip first (name) and last (class) usually
             if (dataCount <= 0) return null;
 
             float[] values = new float[dataCount];
+            // Start at index 2 (skip 'name' and 'frameIndex' typically, depends on GeMAPS conf)
+            // Assuming the original script logic was correct about index offset:
             for (int i = 0; i < dataCount; i++)
                 values[i] = float.Parse(columns[i + 2], CultureInfo.InvariantCulture);
 
             return values;
         }
-        catch (Exception e)
+        catch
         {
-            Debug.LogError("EmotionDetection CSV Exception: " + e.Message);
             return null;
         }
     }
 
-    public class WAV
+    private IEnumerator SetupConfigFiles()
     {
-        public float[] Samples;
-        public int ChannelCount;
-        public int Frequency;
+        // Construction robuste du chemin pour Editor (file://) et Android (jar:file://)
+        string basePath = Application.streamingAssetsPath;
+        string manifestUrl = basePath + "/config_manifest.txt";
 
-        public WAV(byte[] wav)
+        // Si le chemin ne contient pas de protocole (comme sur Editor/PC/Mac), on ajoute file://
+        if (!manifestUrl.Contains("://"))
         {
-            // Channels
-            ChannelCount = wav[22];
+            manifestUrl = "file://" + manifestUrl;
+        }
 
-            // Sample rate
-            Frequency = BitConverter.ToInt32(wav, 24);
+        Debug.Log($"[EmotionDetection] Loading manifest from: {manifestUrl}");
 
-            // Data size
-            int pos = 12;
-            while (!(wav[pos] == 'd' && wav[pos + 1] == 'a' && wav[pos + 2] == 't' && wav[pos + 3] == 'a'))
-                pos += 4;
+        using (UnityWebRequest request = UnityWebRequest.Get(manifestUrl))
+        {
+            yield return request.SendWebRequest();
 
-            pos += 8; // skip header
-            int dataSize = wav.Length - pos;
-
-            int samples = dataSize / 2; // 16-bit = 2 bytes
-            Samples = new float[samples];
-
-            int offset = pos;
-            for (int i = 0; i < samples; i++)
+            if (request.result != UnityWebRequest.Result.Success)
             {
-                short sample = BitConverter.ToInt16(wav, offset);
-                Samples[i] = sample / 32768f;
-                offset += 2;
+                // Message plus clair si le fichier n'existe pas
+                Debug.LogWarning($"[EmotionDetection] Manifest not found at {manifestUrl}. Error: {request.error}. \n" +
+                                 "Make sure 'config_manifest.txt' is in Assets/StreamingAssets if you need custom OpenSMILE configs.");
+                yield break;
+            }
+
+            string manifestText = request.downloadHandler.text;
+
+            foreach (string line in manifestText.Split('\n'))
+            {
+                string file = line.Trim();
+                if (string.IsNullOrEmpty(file)) continue;
+
+                // On vérifie les dossiers config/
+                if (file.StartsWith("config/", StringComparison.OrdinalIgnoreCase))
+                {
+                    string dest = Path.Combine(Application.persistentDataPath, file);
+                    string srcUrl = basePath + "/" + file;
+
+                    // Correction idem pour les fichiers individuels
+                    if (!srcUrl.Contains("://")) srcUrl = "file://" + srcUrl;
+
+                    if (!File.Exists(dest))
+                    {
+                        string dir = Path.GetDirectoryName(dest);
+                        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+                        using (UnityWebRequest fileReq = UnityWebRequest.Get(srcUrl))
+                        {
+                            yield return fileReq.SendWebRequest();
+                            if (fileReq.result == UnityWebRequest.Result.Success)
+                            {
+                                File.WriteAllBytes(dest, fileReq.downloadHandler.data);
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"Failed to extract {file}: {fileReq.error}");
+                            }
+                        }
+                    }
+                }
             }
         }
+        Debug.Log("[EmotionDetection] Config files setup complete.");
     }
-
 }
